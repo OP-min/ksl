@@ -645,12 +645,39 @@ async function importFile(file){
   const vb=obj.schema===SCHEMA.vocab?obj:obj.vocab;
   if(vb&&Array.isArray(vb.items))for(const it of vb.items){if(!vocab.some(v=>v.id===it.id)){vocab.push(it);addV++}}
   if(vb&&Array.isArray(vb.templates))for(const t of vb.templates){if(!templates.some(x=>x.id===t.id)){templates.push(t);addT++}}
-  if(Array.isArray(obj.signers))for(const s of obj.signers)if(!settings.signers.some(x=>x.id===s.id))settings.signers.push({name:s.id,...s});
-  if(Array.isArray(obj.samples))for(const s of obj.samples){if(metas.some(m=>m.sample_id===s.sample_id))continue;
-    const {frames,...meta}=s;await dbPut("frames",frames||[],meta.sample_id);await dbPut("meta",meta);metas.push(meta);addS++;
-    if(!settings.signers.some(x=>x.id===meta.signer_id))settings.signers.push({id:meta.signer_id,name:meta.signer_id,hand:"",note:""})}
+  const samples=Array.isArray(obj.samples)?obj.samples:[];
+  let map={};
+  if(samples.length){map=await askSignerMap(samples,obj.signers||[]);if(!map){await saveVocab();await saveTemplates();render();toast("녹화 가져오기를 취소했어요");return}}
+  for(const s of samples){
+    const {frames,...meta}=s;const to=map[meta.signer_id]||meta.signer_id;
+    if(to!==meta.signer_id){meta.original_signer_id=meta.signer_id;meta.signer_id=to;meta.sample_id=to+"-"+meta.sample_id}
+    if(metas.some(m=>m.sample_id===meta.sample_id))continue;
+    await dbPut("frames",frames||[],meta.sample_id);await dbPut("meta",meta);metas.push(meta);addS++}
   await saveVocab();await saveTemplates();await saveSettings();recog.dirty=true;render();toast(`가져오기 완료: 항목 ${addV}개, 문장 틀 ${addT}개, 녹화 ${addS}개 추가`);
 }
+// 파일 속 제공자 ID를 이 기기의 어느 제공자로 넣을지 묻기
+function askSignerMap(samples,fileSigners){return new Promise(res=>{
+  const ids=[...new Set(samples.map(s=>s.signer_id))];
+  const cnt=id=>samples.filter(s=>s.signer_id===id).length;
+  const opts=sel=>settings.signers.map(s=>`<option value="${esc(s.id)}" ${s.id===sel?"selected":""}>${esc(s.name)} (${esc(s.id)})</option>`).join("")+`<option value="__new">+ 새 제공자 만들기</option>`;
+  modal(`<h3 style="margin-top:0">누구의 녹화인가요?</h3>
+    <p class="help" style="margin-top:0">파일 속 녹화를 이 기기의 어느 제공자로 넣을지 골라 주세요. 다른 사람 휴대폰에서 '제공자 A'로 찍은 녹화라면 여기서 그 사람(예: B)으로 바꿔 넣으면 돼요.</p>
+    ${ids.map((id,i)=>`<div class="tpl"><b>파일 속 제공자 ${esc(id)}</b> <span class="note">녹화 ${cnt(id)}개</span>
+      <label>이 기기에서 넣을 제공자</label><select data-map="${i}">${opts(settings.signers.some(s=>s.id===id)?id:"__new")}</select>
+      <div data-newbox="${i}" style="display:none"><label>새 제공자 ID(영문·숫자)</label><input type="text" data-newid="${i}" placeholder="예: B"><label>이름</label><input type="text" data-newname="${i}" placeholder="예: 남편"></div></div>`).join("")}
+    <div class="acts"><button id="mapNo">취소</button><button class="primary" id="mapOk">가져오기</button></div>`);
+  const sync=()=>document.querySelectorAll("select[data-map]").forEach(s=>{document.querySelector(`[data-newbox="${s.dataset.map}"]`).style.display=s.value==="__new"?"":"none"});
+  document.querySelectorAll("select[data-map]").forEach(s=>s.onchange=sync);sync();
+  $("mapNo").onclick=()=>{closeModal();res(null)};
+  $("mapOk").onclick=async()=>{const map={};
+    for(let i=0;i<ids.length;i++){let to=document.querySelector(`select[data-map="${i}"]`).value;
+      if(to==="__new"){to=document.querySelector(`[data-newid="${i}"]`).value.trim().replace(/[^A-Za-z0-9_]/g,"");
+        if(!to){toast("새 제공자 ID를 입력해 주세요");return}
+        if(!settings.signers.some(s=>s.id===to)){const fs=fileSigners.find(s=>s.id===ids[i])||{};
+          settings.signers.push({id:to,name:document.querySelector(`[data-newname="${i}"]`).value.trim()||to,hand:fs.hand||"",note:fs.note||""})}}
+      map[ids[i]]=to}
+    await saveSettings();closeModal();res(map)};
+});}
 
 /* ---------- 재생 ---------- */
 async function play(id){
